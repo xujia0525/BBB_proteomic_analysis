@@ -1,0 +1,1030 @@
+---
+title: "BBB_proteomic_analysis"
+output: html_document
+date: "2024-07-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+
+#PCA
+```{r pressure, echo=FALSE}
+#PCA analysis for BBB dataset after filteration
+#install.packages("ggrepel")
+library(ggplot2)
+library(dplyr)
+library(ggrepel)
+
+
+
+All = read.csv("filtered_70percent_3groups_noX_0522_1.csv")
+#All=as.data.frame(t(All))
+All <- data.frame(All[,-1], row.names = All[,1])
+#remove group since it is not numeric
+pc <- prcomp(All[,-1],
+             center = TRUE,
+             scale. = TRUE)
+attributes(pc)
+summary(pc)
+print(pc)
+
+# Create a data frame with PCA results and species information
+pc <- as.data.frame(pc$x)
+pc$Group <- All$Group
+
+#visualize pca plot
+library(ggbiplot)
+pdf(file = "PCA_3groups_05222024.pdf")
+ggbiplot(pc,
+              obs.scale = 1,
+              var.scale = 1,
+              groups = All$Group,
+              ellipse = TRUE,
+              circle = TRUE,
+              ellipse.prob = 0.68,
+              var.axes = FALSE) + scale_color_discrete(name = '') + theme(legend.direction = 'horizontal', legend.position = 'top')+ theme_classic()
+dev.off()
+
+
+pdf(file = "PCA_3groups_05222024.pdf")
+ggplot(pc, aes(x = PC1, y = PC2, color = Group)) +
+  geom_point(size = 3) +
+  labs(title = "PCA of BMV Proteome",
+       x = "Principal Component 1",
+       y = "Principal Component 2") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+dev.off()
+
+#give you top 50 genes to PC4:
+# loadings to absolute values with abs()
+PC2=data.frame(sort(abs(pc$rotation[,"PC2"]), decreasing=TRUE)[1:50])
+
+PC_genes=data.frame(pc$rotation)
+PC_genes$Variable <- rownames(PC_genes)
+
+# Select top 10 genes based on absolute values of loadings for PC1
+top_positive_genes <- PC_genes %>%
+  arrange(desc(PC2)) %>%
+  head(10)%>%
+  mutate(color = "red")
+
+top_negative_genes <- PC_genes %>%
+  arrange(PC2) %>%
+  head(10)%>%
+  mutate(color = "blue")
+
+top_genes <- rbind(top_positive_genes, top_negative_genes)
+
+# Create a label and color column to mark top genes
+PC_genes$Label <- ifelse(PC_genes$Variable %in% top_genes$Variable, PC_genes$Variable, "")
+PC_genes$Color <- ifelse(PC_genes$Variable %in% top_positive_genes$Variable, "red",
+                            ifelse(PC_genes$Variable %in% top_negative_genes$Variable, "blue", "black"))
+PC_genes$Color1 <- ifelse(PC_genes$Variable %in% top_positive_genes$Variable, "red",
+                            ifelse(PC_genes$Variable %in% top_negative_genes$Variable, "blue", "black"))
+# Plot the loadings for the top 10 genes using ggplot2
+pdf(file = "PCA_3groups_loading20_05152024.pdf")
+ggplot(PC_genes) +
+  geom_point(aes(x = PC1, y = PC2, color=Color1)) +
+  ggrepel::geom_text_repel(aes(x = PC1, y = PC2, label = Label, color = Color), box.padding = 0.5, point.padding = 0.5, max.overlaps = Inf) +
+  scale_color_identity() +
+  labs(title = "PCA Loading Plot with Specific Points Labeled",
+       x = "Principal Component 1",
+       y = "Principal Component 2") +
+  theme_minimal()
+
+dev.off()
+
+```
+
+# Differential gene expression & GOE analysis
+```{r}
+#Code adapted from https://biocellgen-public.svi.edu.au/sahmri-bulk-rnaseq/de.html
+# Diifferential gene expression anaysis between different age  groups
+
+# Working with data:
+library(dplyr)
+library(magrittr)
+library(readr)
+library(tibble)
+library(reshape2)
+
+# Visualisation:
+library(kableExtra)
+library(ggplot2)
+library(ggbiplot)
+library(ggrepel)
+library(grid)
+library(cowplot)
+# Set ggplot2 theme
+theme_set(theme_bw())
+
+# Other packages:
+library(here)
+library(export)
+
+# Bioconductor packages:
+library(AnnotationHub)
+library(edgeR)
+library(limma)
+library(Glimma)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+
+# import data & separate into 2 age groups
+#https://bioconductor.org/help/course-materials/2015/Uruguay2015/day5-data_analysis.html
+All = read.csv("70percent_3groups_noX.csv")
+All <- data.frame(All[,-1], row.names = All[,1])
+All<- data.frame(All[,-1])
+All<- data.frame(t(All))
+All_develop<- data.frame(All[,1:27])
+All_age<- data.frame(All[,18:34])
+#All_PD<- data.frame(All[,28:38])
+#All_PD_SN<- data.frame(All[,49:56])
+#All_ALZ<- data.frame(All[,39:48])
+
+
+All_log = read.csv("70percent_3groups_1_log2_noX.csv")
+All_log <- data.frame(All_log[,-1], row.names = All_log[,1])
+All_log<- data.frame(t(All_log))
+All_develop_log<- data.frame(All_log[,1:27])
+All_age_log<- data.frame(All_log[,18:34])
+#All_PD_log<- data.frame(All_log[,28:38])
+#All_PD_SN_log<- data.frame(All_log[,49:56])
+#All_ALZ_log<- data.frame(All_log[,39:48])
+
+t.test(All_develop[2,1:17], All_develop[2,18:27])
+
+ttestAll_develop <- function(df, grp1, grp2) {
+  x = df[grp1]
+  y = df[grp2]
+  x = as.numeric(x)
+  y = as.numeric(y)  
+  results_2 = t.test(x, y)
+  results_2$p.value
+}
+rawpvalue_develop = apply(All_develop, 1, ttestAll_develop, grp1 = c(1:17), grp2 = c(18:27))
+
+hist(rawpvalue_develop)
+p_adjust_develop=p.adjust(rawpvalue_develop,method="fdr")
+raw_group1=apply(All[,1:17], 1, mean)
+raw_group2=apply(All[,18:27], 1, mean)
+raw_group3=apply(All[,28:34], 1, mean)
+raw_foldchange_1=raw_group1/raw_group2
+raw_foldchange_2=raw_group3/raw_group2
+results_mean_fold = cbind(raw_group1,raw_group2,raw_group3,raw_foldchange_1,raw_foldchange_2,rawpvalue_develop,rawpvalue_age)
+results_mean_fold = as.data.frame(results_mean_fold)
+write.table(results_mean_fold, "results_mean_fold_1027.csv", sep=",",row.names=TRUE)
+
+#make a table
+kable(df) %>% kable_styling(latex_options = “striped”)
+
+
+##transform our data into log2 base. Already log2 
+#calculate the mean of each gene per control group
+group1_dev = apply(All_develop_log[,1:17], 1, mean)
+#calcuate the mean of each gene per test group
+group2_dev = apply(All_develop_log[,18:27], 1, mean) 
+#confirming that we have a vector of numbers
+class(group1) 
+class(group2) 
+#because our data is already log2 transformed, we can take the difference between the means.  
+#And this is our log2 Fold Change or log2 Ratio == log2(control / test)
+
+foldchange_develop<- group2_dev-group1_dev
+class(foldchange_develop) 
+#hist(foldchange_develop, xlab = "log2 Fold Change (Neonates&infants vs Children&adults)")
+
+results_develop = cbind(foldchange_develop, rawpvalue_develop,p_adjust_develop)
+results_develop = as.data.frame(results_develop)
+
+
+#https://pubchem.ncbi.nlm.nih.gov/upload/tools/ find ID from gene symbols
+annot = read.csv(file = "entrezgene.csv");
+probes = rownames(results_develop)
+probes2annot = match(probes, annot$query)
+allLLIDs = annot$entrezgene[probes2annot]
+results_develop = cbind(results_develop,allLLIDs)
+results_develop = as.data.frame(results_develop)
+
+results_develop$probename <- rownames(results_develop)
+write.table(results_develop, "results_age_1027.csv", sep=",",row.names=TRUE)
+
+
+# Match probes in the data set to the probe IDs in the annotation file
+#probes = femData$substanceBXH
+library(tidyverse)
+library(ggrepel)
+
+#p1_2 <- ggplot(results_2_1, aes(foldchange_2, -log(p_adjust_2,10))) + # -log10 conversion  
+  #geom_point(size = 2/5) +
+  #xlab(expression("log"[2]*"FC")) + 
+  #ylab(expression("-log"[10]*"FDR"))
+#p1_2
+
+#https://sdgamboa.github.io/post/2020_volcano/
+
+
+#p2 <- ggplot(results_60, aes(foldchange, -log(p_adjust,10))) +
+  #geom_point(aes(color = Expression), size = 2/5) +
+  #xlab(expression("log"[2]*"FC")) + 
+  #ylab(expression("-log"[10]*"FDR")) +
+  #scale_color_manual(values = c("dodgerblue3", "gray50", "firebrick3")) +
+  #guides(colour = guide_legend(override.aes = list(size=1.5))) 
+#p2
+
+#https://bioconductor.org/packages/devel/bioc/vignettes/EnhancedVolcano/inst/doc/EnhancedVolcano.html
+#EnhancedVolcano(results_develop,
+                #lab = rownames(results_develop),
+                #x = 'foldchange_develop',
+                #y = 'p_adjust_develop')
+
+library(EnhancedVolcano)
+develop_volcano_0907=EnhancedVolcano(results_develop,
+                lab = rownames(results_develop),
+                x = 'foldchange_develop',
+                y = 'p_adjust_develop',
+                title = 'Development Vs. Adult',
+                ylim = c(0, 6.5),
+                pCutoff = 0.1,
+                FCcutoff = log(1.5,base=2),
+                pointSize = 2.0,
+                labSize = 5.0,
+                col=c('black', 'black', 'black', 'red3'),
+                selectLab = c(
+                  'SLC22A3',
+                  'SLC2A4',
+                  'SLC22A6',
+                  'SLCO2A1',
+                  'SLC35E1',
+                  'SLC7A8',
+                  'SLC7A1',
+                  'SLC7A5',
+                  'ABCC9',
+                  'ITGB6',
+                  'ITGB5',
+                  'ITGA3',
+                  'CLDN11',
+                  'COL1A2',
+                  'COL6A6',
+                  'COL11A1',
+                  'COL4A3','PCDH17','ABCC4','STRA6','FGF2','COL4A4','SERPINH1','ADGRG1','SPARC'),
+                labCol = 'black',
+                labFace = 'bold',
+                boxedLabels = TRUE,
+                drawConnectors = TRUE,
+                widthConnectors = 1.0,
+                colConnectors = 'black',
+                max.overlaps = 30)
+develop_volcano_0907
+
+develop_volcano=EnhancedVolcano(results_develop,
+                                     lab = rownames(results_develop),
+                                     x = 'foldchange_develop',
+                                     y = 'p_adjust_develop',
+                                     title = 'Neonates&infants vs Children&adults',
+                                     pCutoff = 0.1,
+                                     FCcutoff = log(1.5,base=2),
+                                     pointSize = 2.0,
+                                     labSize = 5.0,
+                                     col=c('black', 'black', 'black', 'red3'),
+                                     selectLab = c('PCDH17',' COL4A4',
+                                                   'SLC2A4','SLC22A3','ABCA8','SLC35A4','SLC7A1','SLC16A2','SLC22A6','SLCO2A1',
+                                                   'SLC7A8','ABCC4','STRA6','FGF2','COL4A4'),
+                                     labCol = 'black',
+                                     labFace = 'bold',
+                                     boxedLabels = TRUE,
+                                     drawConnectors = TRUE,
+                                     widthConnectors = 1.0,
+                                     colConnectors = 'black')
+develop_volcano_0907
+
+
+develop_volcano=EnhancedVolcano(results_develop,
+                                lab = rownames(results_develop),
+                                x = 'foldchange_develop',
+                                y = 'p_adjust_develop',
+                                title = 'Neonates&infants vs Children&adults',
+                                pCutoff = 0.1,
+                                FCcutoff = log(1.5,base=2),
+                                pointSize = 2.0,
+                                labSize = 5.0,)
+develop_volcano
+
+# GO analysis
+library(clusterProfiler)
+all_go<-All_1$allLLIDs
+de<-results_develop$allLLIDs
+results_develop_down <- subset(results_develop,foldchange_develop<=-log(1.5,base=2) & p_adjust_develop<=0.1)
+de_down_list_develop<-results_develop_down$allLLIDs
+results_develop_up <- subset(results_develop,foldchange_develop>= log(1.5,base=2) & p_adjust_develop<=0.1)
+de_up_list_develop<-results_develop_up$allLLIDs
+ego_BP_dev <- enrichGO(de, OrgDb = "org.Hs.eg.db", ont="BP", readable=TRUE)
+ego_BP_down_dev <- enrichGO(de_down_list_develop, OrgDb = "org.Hs.eg.db", ont="BP", readable=TRUE)
+ego_BP_up_dev <- enrichGO(de_up_list_develop, OrgDb = "org.Hs.eg.db", ont="BP", readable=TRUE)
+#ego_BP <- enrichGO(de_2, OrgDb = "org.Hs.eg.db", ont="BP", readable=TRUE)
+write.table(ego_BP_up_dev, "ego_BP_up_dev.csv", sep=",",row.names=TRUE)
+write.table(results_develop_1_up, "NeonateAdult_up_genes.csv", sep=",",row.names=TRUE)
+
+NeonateAdult_down_genes = read.csv("NeonateAdult_down_genes.csv")
+NeonateAdult_down_genes <- data.frame(NeonateAdult_down_genes[,-1], row.names =NeonateAdult_down_genes[,1])
+NeonateAdult_up_genes = read.csv("NeonateAdult_up_genes.csv")
+NeonateAdult_up_genes <- data.frame(NeonateAdult_up_genes[,-1], row.names =NeonateAdult_up_genes[,1])
+
+#select GO terms specifically related to BBB
+ego_BP_up_dev_bbb= read.csv("ego_BP_up_dev_bbb.csv")
+ego_BP_down_dev_bbb= read.csv("ego_BP_down_dev_bbb.csv")
+# make dotplot with specific GO term
+library(ggplot2)
+
+
+ggplot(data = ego_BP_up_dev_bbb, aes(x = GeneRatio, y = reorder(Description, GeneRatio), 
+                        color = `p.adjust`, size = Count)) + 
+  geom_point() +
+  scale_color_gradient(low = "red", high = "blue") +
+  theme_bw() + 
+  ylab("") + 
+  xlab("") + 
+  ggtitle("Top GO terms associated with BBB (Increase_dev)")
+
+dotplot_all=dotplot(
+  ego_BP_all,
+  x = "GeneRatio",
+  color = "p.adjust",
+  showCategory = 10,
+  size = NULL,
+  split = NULL,
+  font.size = 11,
+  title = "GO term associated with BBB proteome",
+  label_format = 30,
+  
+)
+dotplot_all
+
+dotplot_up_dev=dotplot(
+  ego_BP_up_dev,
+  x = "GeneRatio",
+  color = "p.adjust",
+  showCategory = 10,
+  size = NULL,
+  split = NULL,
+  font.size = 11,
+  title = "Proteins Increase through Development",
+  label_format = 30,
+  
+)
+dotplot_up_dev
+
+save(,
+     file = "bbb-develop-DGE.RData")
+
+
+
+#dotplot_2_all<-dotplot(ego_BP, showCategory=15)+theme(axis.text.y = element_text(size = 14))
+dotplot_2_down_dev<-dotplot(ego_BP_down_dev, showCategory=15)+theme(axis.text.y = element_text(size = 11))
+dotplot_2_up_dev<-dotplot(ego_BP_up_dev, showCategory=15)+theme(axis.text.y = element_text(size = 13))
+dotplot_2_down_dev
+dotplot_2_up_dev
+
+
+#Doing same thing with Adult vs adult over 60
+ttestAll_age <- function(df, grp1, grp2) {
+  x = df[grp1]
+  y = df[grp2]
+  x = as.numeric(x)
+  y = as.numeric(y)  
+  results = t.test(x, y)
+  results$p.value
+}
+rawpvalue_age = apply(All_age, 1, ttestAll_age, grp1 = c(1:10), grp2 = c(11:17))
+
+t.test(All_age[1,1:10], All_age[1,11:17])
+
+hist(rawpvalue_age)
+p_adjust_age=p.adjust(rawpvalue_age,method="fdr")
+
+##transform our data into log2 base. Already log2 
+#calculate the mean of each gene per control group
+group1_age = apply(All_age_log[,1:10], 1, mean)
+#calcuate the mean of each gene per test group
+group2_age = apply(All_age_log[,11:17], 1, mean) 
+#confirming that we have a vector of numbers
+class(group1) 
+class(group2) 
+#because our data is already log2 transformed, we can take the difference between the means.  
+#And this is our log2 Fold Change or log2 Ratio == log2(control / test)
+
+foldchange_age<- group2_age-group1_age
+class(foldchange_age) 
+#hist(foldchange_age, xlab = "log2 Fold Change (Neonates&infants vs Children&adults)")
+
+results_age = cbind(foldchange_age, rawpvalue_age,p_adjust_age)
+results_age = as.data.frame(results_age)
+
+write.table(results_age, "results_age_03062024.csv", sep=",",row.names=TRUE)
+
+
+annot = read.csv(file = "entrezgene.csv");
+probes = rownames(results_age)
+probes2annot = match(probes, annot$query)
+allLLIDs = annot$entrezgene[probes2annot]
+results_age_1 = cbind(foldchange_age, rawpvalue_age,p_adjust_age,allLLIDs)
+results_age_1 = as.data.frame(results_age_1)
+
+results_age_1$probename <- rownames(results_age)
+
+#Volcano plot and GO enrichment analysis
+library(EnhancedVolcano)
+
+age_volcano=EnhancedVolcano(results_age,
+                                lab = rownames(results_develop),
+                                x = 'foldchange_develop',
+                                y = 'p_adjust_develop',
+                                title = 'Neonates&infants vs Children&adults',
+                                pCutoff = 0.1,
+                                FCcutoff = log(1.5,base=2),
+                                pointSize = 2.0,
+                                labSize = 5.0,
+                                col=c('black', 'black', 'black', 'red3'),
+                                selectLab = c('PCDH17',' COL4A4',
+                                              'SLC2A4','SLC22A3','ABCA8','SLC35A4','SLC7A1','SLC16A2','SLC22A6','SLCO2A1',
+                                              'SLC7A8','ABCC4','STRA6','FGF2','COL4A4'),
+                                labCol = 'black',
+                                labFace = 'bold',
+                                boxedLabels = TRUE,
+                                drawConnectors = TRUE,
+                                widthConnectors = 1.0,
+                                colConnectors = 'black')
+develop_volcano_0907
+age_volcano
+
+age_volcano_1003=EnhancedVolcano(results_age,
+                                     lab = rownames(results_age),
+                                     x = 'foldchange_age',
+                                     y = 'p_adjust_age',
+                                     title = 'Adults vs Elderly',
+                                     ylim = c(0, 3),
+                                     pCutoff = 0.1,
+                                     FCcutoff = log(1.5,base=2),
+                                     pointSize = 2.0,
+                                     labSize = 5.0,
+                                     col=c('black', 'black', 'black', 'red3'),
+                                     selectLab = c(
+                                       'SLC52A2',
+                                       'SLC7A8',
+                                       'SLC30A10',
+                                       'ITGB4',
+                                       'COLEC12',
+                                       'ITGA4',
+                                       'SLC35F6',
+                                       'SLC40A1',
+                                       'SLC52A3',
+                                       'SLC38A2',
+                                       'ABCC9',
+                                       'ABCB10',
+                                       'SLC39A11',
+                                       'SLC22A3',
+                                       'ABCA6',
+                                       'SLCO1A2',
+                                       'ITGA2.1',
+                                       'SLC30A5',
+                                       'SLC39A8',
+                                       'ABCA1',
+                                       'SLC38A5',
+                                       'SLC39A10','TXN','FXYD1','APOD','LRRC32'),
+                                     labCol = 'black',
+                                     labFace = 'bold',
+                                     boxedLabels = TRUE,
+                                     drawConnectors = TRUE,
+                                     widthConnectors = 1.0,
+                                     colConnectors = 'black',
+                                     max.overlaps = 30)
+age_volcano_1003
+
+# GO analysis
+library(clusterProfiler)
+#de<-results_age_1$allLLIDs
+results_age_1_down <- subset(results_age_1,foldchange_age<=-log(1.5,base=2) & p_adjust_age<=0.1)
+de_2_down_list_age<-results_age_1_down$allLLIDs
+results_age_1_up <- subset(results_age_1,foldchange_age>= log(1.5,base=2) & p_adjust_age<=0.1)
+de_2_up_list_age<-results_age_1_up$allLLIDs
+ego_BP_down_age<- enrichGO(de_2_down_list_age, OrgDb = "org.Hs.eg.db", ont="BP", readable=TRUE)
+ego_BP_up_age <- enrichGO(de_2_up_list_age, OrgDb = "org.Hs.eg.db", ont="BP", readable=TRUE)
+#ego_BP <- enrichGO(de_2, OrgDb = "org.Hs.eg.db", ont="BP", readable=TRUE)
+write.table(results_age_1_down, "Adult_down_genes_1003.csv", sep=",",row.names=TRUE)
+write.table(results_age_1_up, "Adult_up_genes_1003.csv", sep=",",row.names=TRUE)
+write.table(ego_BP_down_age, "ego_BP_down_age_1003.csv", sep=",",row.names=TRUE)
+write.table(ego_BP_up_age, "ego_BP_up_age_1003.csv", sep=",",row.names=TRUE)
+
+
+Age_up_BBB = read.csv("ego_BP_up_age_BBB_1003.csv")
+Age_down_BBB = read.csv("ego_BP_down_age_BBB_1003.csv")
+
+ggplot(data = Age_down_BBB, aes(x = GeneRatio, y = reorder(Description, GeneRatio), 
+                                     color = `p.adjust`, size = Count)) + 
+  geom_point() +
+  scale_color_gradient(low = "red", high = "blue") +
+  theme_bw() + 
+  ylab("") + 
+  xlab("") + 
+  ggtitle("Top GO terms associated with BBB (Decrease_age)")
+
+ggplot(data = Age_up_BBB, aes(x = GeneRatio, y = reorder(Description, GeneRatio), 
+                                color = `p.adjust`, size = Count)) + 
+  geom_point() +
+  scale_color_gradient(low = "red", high = "blue") +
+  theme_bw() + 
+  ylab("") + 
+  xlab("") + 
+  ggtitle("Top GO terms associated with BBB (Increase_age)")
+
+
+
+#dotplot_2_all<-dotplot(ego_BP, showCategory=15)+theme(axis.text.y = element_text(size = 14))
+dotplot_down_age=dotplot(
+  Age_down_BBB,
+  x = "GeneRatio",
+  color = "p.adjust",
+  showCategory = 6,
+  size = NULL,
+  split = NULL,
+  font.size = 11,
+  title = "Proteins Decrease through Aging",
+  label_format = 30,
+  
+)
+dotplot_down_age
+
+dotplot_up_age=dotplot(
+  ego_BP_up_age,
+  x = "GeneRatio",
+  color = "p.adjust",
+  showCategory = 10,
+  size = NULL,
+  split = NULL,
+  font.size = 11,
+  title = "Proteins Increase through Aging",
+  label_format = 30,
+  
+)
+dotplot_up_age
+
+
+# GOE for PCA (PC2 genes)
+pc2_up=read.csv("~/Box Sync/Ahitub_Giacomini_Lab/BBB NIH neurobiobank/proteomics/BBB proteomics windows/filter/noX/PCA/PC2_top50.csv")
+pc2_last=read.csv("~/Box Sync/Ahitub_Giacomini_Lab/BBB NIH neurobiobank/proteomics/BBB proteomics windows/filter/noX/PCA/PC2_last50.csv")
+
+annot = read.csv(file = "entrezgene.csv");
+probes_pc2up = pc2_up$Top100
+probes_pc2up_annot = match(probes_pc2up, annot$query)
+allLLIDs_pc2up = annot$entrezgene[probes_pc2up_annot]
+pc2_up = cbind(pc2_up,allLLIDs_pc2up)
+pc2_up = as.data.frame(pc2_up)
+
+probes_pc2down = pc2_last$Last100
+probes_pc2down_annot = match(probes_pc2down, annot$query)
+allLLIDs_pc2down = annot$entrezgene[probes_pc2down_annot]
+pc2_down = cbind(pc2_last,allLLIDs_pc2down)
+pc2_down = as.data.frame(pc2_down)
+
+ego_BP_pc2_up<- enrichGO(pc2_up$allLLIDs_pc2up, OrgDb = "org.Hs.eg.db", ont="BP", readable=TRUE)
+ego_BP_pc2_down <- enrichGO(pc2_down$allLLIDs_pc2down, OrgDb = "org.Hs.eg.db", ont="BP", readable=TRUE)
+
+write.table(ego_BP_pc2_up, "ego_BP_pc2_top100_1010.csv", sep=",",row.names=TRUE)
+write.table(ego_BP_pc2_down, "ego_BP_pc2_last100_1010.csv", sep=",",row.names=TRUE)
+
+dotplot_pc2_up=dotplot(
+  ego_BP_pc2_up,
+  x = "GeneRatio",
+  color = "p.adjust",
+  showCategory = 6,
+  size = NULL,
+  split = NULL,
+  font.size = 11,
+  title = "Proteins Associated with PC2 (top 100)",
+  label_format = 30,
+  
+)
+dotplot_pc2_up
+
+dotplot_pc2_down=dotplot(
+  ego_BP_pc2_down,
+  x = "GeneRatio",
+  color = "p.adjust",
+  showCategory = 6,
+  size = NULL,
+  split = NULL,
+  font.size = 11,
+  title = "Proteins Associated with PC2 (last 100)",
+  label_format = 30,
+  
+)
+dotplot_pc2_down
+
+
+
+
+PC2_topselect = read.csv("ego_BP_pc2_topselect.csv")
+PC2_lastselect = read.csv("ego_BP_pc2_lastselect.csv")
+options(repr.plot.width = 5, repr.plot.height =2) 
+ggplot(data = PC2_topselect, aes(x = GeneRatio, y = reorder(Description, GeneRatio), 
+                                color = `p.adjust`, size = Count)) + 
+  geom_point() +
+  scale_color_gradient(low = "red", high = "blue") +
+  theme_bw() + 
+  ylab("") + 
+  xlab("") + 
+  ggtitle("GO terms positively associated with PC2")
+
+ggplot(data = PC2_lastselect, aes(x = GeneRatio, y = reorder(Description, GeneRatio), 
+                              color = `p.adjust`, size = Count)) + 
+  geom_point() +
+  scale_color_gradient(low = "red", high = "blue") +
+  theme_bw() + 
+  ylab("") + 
+  xlab("") + 
+  ggtitle("GO terms negatively associated with PC2")
+
+
+#Check difference between neonates&infants 
+ttestAll_neo <- function(df, grp1, grp2) {
+  x = df[grp1]
+  y = df[grp2]
+  x = as.numeric(x)
+  y = as.numeric(y)  
+  results_2 = t.test(x, y)
+  results_2$p.value
+}
+rawpvalue_neo = apply(All_develop, 1, ttestAll_neo, grp1 = c(1:7), grp2 = c(8:17))
+
+p_adjust_neo=p.adjust(rawpvalue_neo,method="fdr")
+
+##transform our data into log2 base. Already log2 
+#calculate the mean of each gene per control group
+group1_neo = apply(All_develop_log[,1:7], 1, mean)
+#calcuate the mean of each gene per test group
+group2_neo = apply(All_develop_log[,8:17], 1, mean) 
+#confirming that we have a vector of numbers
+class(group1) 
+class(group2) 
+#because our data is already log2 transformed, we can take the difference between the means.  
+#And this is our log2 Fold Change or log2 Ratio == log2(control / test)
+
+foldchange_neo<- group2_neo-group1_neo
+class(foldchange_neo) 
+#hist(foldchange_neo, xlab = "log2 Fold Change (Neonates&infants vs Children&adults)")
+
+results_neo = cbind(foldchange_neo, rawpvalue_neo,p_adjust_neo)
+results_neo = as.data.frame(results_neo)
+
+
+neo_volcano=EnhancedVolcano(results_neo,
+                            lab = rownames(results_neo),
+                            x = 'foldchange_neo',
+                            y = 'p_adjust_neo',
+                            title = 'Neonates vs infant',
+                            pCutoff = 0.1,
+                            FCcutoff = log(1.5,base=2),
+                            pointSize = 2.0,
+                            labSize = 5.0)
+neo_volcano
+```
+
+
+#WGCNA
+```{r}
+BiocManager::install("impute")
+BiocManager::install("preprocessCore")
+#Code adapted from https://cran.r-project.org/web/packages/WGCNA/WGCNA.pdf
+
+library(WGCNA)
+options(stringsAsFactors = FALSE)
+
+#All_1 = read.csv("filtered_70percent_3groups_noX_0522_1.csv")
+#dim(All_1);
+#names(All_1);
+#Change first column to row name
+
+All = read.csv("Filtered_70percent_3groups_noX_sampleinfo_final.csv")
+All <- data.frame(All[,-1], row.names = All[,1])
+All_1<- data.frame(All[,-(1:15)])
+
+
+#nrow(All_1)
+
+#All_1<- as.data.frame(t(All_1))
+
+#We first check for genes and samples with too many missing values:
+gsg = goodSamplesGenes(All_1, verbose = 3);
+gsg$allOK
+
+#If the last statement returns TRUE, All_1 genes have passed the cuts. 
+#If not, we remove the offending genes and samples from the data:
+if (!gsg$allOK)
+{
+  # OptionAll_1y, print the gene and sample names that were removed:
+  if (sum(!gsg$goodGenes)>0)
+    printFlush(paste("Removing genes:", paste(names(All_1)[!gsg$goodGenes], collapse = ", ")));
+  if (sum(!gsg$goodSamples)>0)
+    printFlush(paste("Removing samples:", paste(rownames(All_1)[!gsg$goodSamples], collapse = ", ")));
+  # Remove the offending genes and samples from the data:
+  All_1 = All_1[gsg$goodSamples, gsg$goodGenes]
+}
+
+#Next we cluster the samples (in contrast to clustering genes that will come later) 
+#to see if there are any obvious outliers.
+sampleTree = hclust(dist(All_1), method = "average");
+# Plot the sample tree: Open a graphic output window of size 12 by 9 inches
+# The user should change the dimensions if the window is too large or too smAll_1.
+sizeGrWindow(12,9)
+#pdf("Plots_sampleClustering_0523.pdf", width = 12, height = 9);
+par(cex = 0.6);
+par(mar = c(0,4,2,0))
+plot(sampleTree, main = "Sample clustering to detect outliers", sub="", xlab="", cex.lab = 1.5,
+     cex.axis = 1.5, cex.main = 2)
+abline(h = 1600, col = "red")
+dev.off()
+# Plot a line to show the cut
+;
+# Determine cluster under the line
+clust = cutreeStatic(sampleTree, cutHeight = 2000, minSize = 10)
+table(clust)
+# clust 1 contains the samples we want to keep.
+#keepSamples = (clust==1)
+#All_1 = All_1[keepSamples, ]
+#nrow(All_1)
+#nGenes = ncol(All_1)
+#nSamples = nrow(All_1)
+
+#We now read in the trait data and match the samples for which they were measured to the expression samples.
+allTraits = read.csv("Age_group.csv");
+#allTraits <- data.frame(allTraits[,-1], row.names = allTraits[,1])
+
+
+
+# remove columns that hold information we do not need.
+#alltraits = traitData[, -c(31, 16)];
+#alltraits = alltraits[, c(2, 11:36) ];
+#dim(alltraits)
+#names(alltraits)
+
+# Form a data frame analogous to expression data that will hold the clinical traits.
+Samples = rownames(All_1);
+#Samples_a=rownames(allTraits)
+traitRows = match(Samples, allTraits$X)
+datTraits = allTraits[traitRows, -1];
+#write.table(datTraits,"datTraits.csv",sep=",",row.names=TRUE)
+#datTraits=read.csv("datTraits.csv")
+#datTraits <- data.frame(datTraits[,-1], row.names = datTraits[,1])
+rownames(datTraits) = allTraits[traitRows, 1];
+collectGarbage();
+
+# Re-cluster samples
+sampleTree2 = hclust(dist(All_1), method = "average")
+# Convert traits to a color representation: white means low, red means high, grey means missing entry
+traitColors = numbers2colors(datTraits, signed = FALSE);
+# Plot the sample dendrogram and the colors underneath.
+sizeGrWindow(12,9)
+plotDendroAndColors(sampleTree2, traitColors,
+                    groupLabels = names(datTraits),
+                    main = "Sample dendrogram and trait heatmap")
+
+save(All_1, datTraits, file = "bbb-develop-01-dataInput.RData")
+
+# All_1ow multi-threading within WGCNA. This helps speed up certain calculations.
+# At present this cAll_1 is necessary for the code to work.
+# Any error here may be ignored but you may want to update WGCNA if you see one.
+# Caution: skip this line if you run RStudio or other third-party R environments.
+# See note above.
+#enableWGCNAThreads()
+#All_1owWGCNAThreads()
+
+# Choose a set of soft-thresholding powers
+powers = c(c(1:10), seq(from = 12, to=20, by=2))
+# CAll_1 the network topology analysis function
+sft = pickSoftThreshold(All_1, powerVector = powers, verbose = 5)
+# Plot the results:
+sizeGrWindow(9, 5)
+par(mfrow = c(1,2));
+cex1 = 0.9;
+# Scale-free topology fit index as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit,signed R^2",type="n",
+     main = paste("Scale independence"));
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     labels=powers,cex=cex1,col="red");
+# this line corresponds to using an R^2 cut-off of h
+abline(h=0.90,col="red")
+# Mean connectivity as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], sft$fitIndices[,5],
+     xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",
+     main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+
+#The result is shown in Fig. 1. We choose the power 6, which is the lowest power for which the scale-free topology fit
+#index curve flattens out upon reaching a high value (in this case, roughly 0.90).
+#Constructing the gene network and identifying modules is now a simple function cAll_1:
+net = blockwiseModules(All_1, power = 6,
+                       TOMType = "unsigned", minModuleSize = 30,
+                       reassignThreshold = 0, mergeCutHeight = 0.25,
+                       numericLabels = TRUE, pamRespectsDendro = FALSE,
+                       saveTOMs = TRUE,
+                       saveTOMFileBase = "BBB_develop_TOM",
+                       verbose = 3)
+table(net$colors)
+#write.table(TOM,"Tom_development.csv",sep=",",row.names=TRUE)
+# open a graphics window
+sizeGrWindow(12, 9)
+# Convert labels to colors for plotting
+mergedColors = labels2colors(net$colors)
+# Plot the dendrogram and the module colors underneath
+plotDendroAndColors(net$dendrograms[[1]], mergedColors[net$blockGenes[[1]]],
+                    "Module colors",
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05)
+#We now save the module assignment and module eigengene information necessary for subsequent analysis.
+moduleLabels = net$colors
+moduleColors = labels2colors(net$colors)
+A=cbind(moduleLabels,moduleColors)
+write.table(A,"gene_module_0524.csv",sep=",",row.names=TRUE)
+MEs = net$MEs;
+geneTree = net$dendrograms[[1]];
+save(MEs, moduleLabels, moduleColors, geneTree,
+     file = "bbb-develop-02-networkConstruction-auto.RData")
+
+
+#In this analysis we would like to identify modules that are significantly associated with the measured clinical traits.
+#Since we already have a summary profile (eigengene) for each module, we simply correlate eigengenes with external
+#traits and look for the most significant associations:
+# Define numbers of genes and samples
+nGenes = ncol(All_1);
+nSamples = nrow(All_1);
+# Recalculate MEs with color labels
+MEs0 = moduleEigengenes(All_1, moduleColors)$eigengenes
+MEs = orderMEs(MEs0)
+moduleTraitCor = cor(MEs, datTraits, use = "p");
+module_trait_cor=data.frame(cbind(moduleTraitCor,moduleTraitPvalue))
+write.table(module_trait_cor,"module_trait_cor_0524.csv",sep=",",row.names=TRUE)
+moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nSamples);
+view(moduleTraitPvalue)
+#Since we have a moderately large number of modules and traits, a suitable graphical representation will help in
+#reading the table. We color code each association by the correlation value:
+sizeGrWindow(10,6)
+# Will display correlations and their p-values
+textMatrix = paste(signif(moduleTraitCor, 2), "\n(",
+                   signif(moduleTraitPvalue, 1), ")", sep = "");
+
+
+dim(textMatrix) = dim(moduleTraitCor)
+par(mar = c(6, 8.5, 3, 3));
+# Display the correlation values within a heatmap plot
+labeledHeatmap(Matrix = moduleTraitCor,
+               xLabels = names(datTraits),
+               yLabels = names(MEs),
+               ySymbols = names(MEs),
+               colorLabels = FALSE,
+               colors = blueWhiteRed(50),
+               textMatrix = textMatrix,
+               setStdMargins = FALSE,
+               cex.text = 0.5,
+               zlim = c(-1,1),
+               main = paste("Module-trait relationships"))
+
+#Gene relationship to trait and important modules: Gene Significance and Module Membership
+# Define variable weight containing the weight column of datTrait
+Age_days = as.data.frame(datTraits$Age_days);
+names(Age_days) = "Age_days"
+# names (colors) of the modules
+modNames = substring(names(MEs), 3)
+geneModuleMembership = as.data.frame(cor(All_1, MEs, use = "p"));
+MMPvalue = as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples));
+names(geneModuleMembership) = paste("MM", modNames, sep="");
+names(MMPvalue) = paste("p.MM", modNames, sep="");
+geneTraitSignificance = as.data.frame(cor(All_1, Age_days, use = "p"));
+GSPvalue = as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance), nSamples));
+names(geneTraitSignificance) = paste("GS.", names(Age_days), sep="");
+names(GSPvalue) = paste("p.GS.", names(Age_days), sep="");
+
+#Intramodular analysis: identifying genes with high GS and MM
+#Using the GS and MM measures, we can identify genes that have a high significance for weight as well as high module
+#membership in interesting modules. As an example, we look at the brown module that has the highest association
+#with weight. We plot a scatterplot of Gene Significance vs. Module Membership in the brown module:
+
+module = "blue"
+column = match(module, modNames);
+moduleGenes = moduleColors==module;
+sizeGrWindow(7, 7);
+par(mfrow = c(1,1));
+verboseScatterplot(abs(geneModuleMembership[moduleGenes, column]),
+                   abs(geneTraitSignificance[moduleGenes, 1]),
+                   xlab = paste("Module Membership in", module, "module"),
+                   ylab = "Gene significance for Age_days(positive)",
+                   main = paste("Module membership vs. gene significance\n"),
+                   cex.main = 1.2, cex.lab = 1.2, cex.axis = 1.2, col = module)
+
+#Summary output of network analysis results
+names(All_1)
+#will return All_1 probe IDs included in the analysis. Similarly,
+brown=names(All_1)[moduleColors=="brown"]
+purple=names(All_1)[moduleColors=="purple"]
+yellow=names(All_1)[moduleColors=="yellow"]
+darkred=names(All_1)[moduleColors=="darkred"]
+color=as.data.frame(moduleColors)
+color=as.data.frame(t(color))
+write.table(color,"module_color_0524.csv",sep=",",row.names=TRUE)
+All_2=rbind(All_1,color)
+
+textMatrix_1=as.data.frame(textMatrix)
+
+
+
+brown=as.data.frame(brown)
+blue=as.data.frame(blue)
+Salmon=as.data.frame(salmon)
+write.table(brown,"brown_gene.csv",sep=",",row.names=TRUE)
+
+# The following is the number or probes without annotation:
+sum(is.na(probes2annot))
+# Should return 0.
+
+#Output gene lists for use with online software and services
+
+#Get entrezgene from myGene
+library(mygene)
+probes = names(All_1)
+A=queryMany(probes, scopes="symbol", species="human")
+B=as.data.frame(A)
+write.table(B,"entrezgene_disease.csv",sep=",",row.names = TRUE, col.names = TRUE)
+
+# Read in the probe annotation
+annot = read.csv(file = "entrezgene_disease.csv");
+# Match probes in the data set to the probe IDs in the annotation file
+#probes = femData$substanceBXH
+probes = names(All_1)
+probes2annot = match(probes, annot$query)
+#Get the corresponding Locuis Link IDs
+All_1LLIDs = annot$entrezgene[probes2annot];
+
+# $ Choose interesting modules
+intModules = c("grey", "blue", "turguoise")
+for (module in intModules)
+{
+  # Select module probes
+  modGenes = (moduleColors==module)
+  # Get their entrez ID codes
+  modLLIDs = probes;
+  # Write them into a file
+  fileName = paste("LocusLinkIDs-", module, ".txt", sep="");
+  write.table(as.data.frame(modLLIDs), file = fileName,
+              row.names = FALSE, col.names = FALSE)
+}
+# As background in the enrichment analysis, we will use All_1 probes in the analysis.
+fileName = paste("LocusLinkIDs-All_1.txt", sep="");
+write.table(as.data.frame(All_1LLIDs), file = fileName,
+            row.names = FALSE, col.names = FALSE)
+
+#Enrichment analysis directly within R
+GOenr = GOenrichmentAnalysis(moduleColors, All_1LLIDs, organism = "human", nBestP =30);
+tab = GOenr$bestPTerms[[4]]$enrichment
+write.table(tab, file = "GOEnrichmentTable_4_30.csv", sep = ",", quote = TRUE, row.names = FALSE)
+#take a quick look
+keepCols = c(1, 2, 5, 6, 7, 12, 13);
+screenTab = tab[, keepCols];
+# Round the numeric columns to 2 decimal places:
+numCols = c(3, 4);
+screenTab[, numCols] = signif(apply(screenTab[, numCols], 2, as.numeric), 2)
+# Truncate the the term name to at most 40 characters
+screenTab[, 7] = substring(screenTab[, 7], 1, 40)
+# Shorten the column names:
+colnames(screenTab) = c("module", "size", "p-val", "Bonf", "nInTerm", "ont", "term name");
+rownames(screenTab) = NULL;
+# Set the width of R’s output. The reader should play with this number to obtain satisfactory output.
+options(width=95)
+# Finally, display the enrichment table:
+write.table(screenTab, file = "GOEnrichmentTable_simple.csv", sep = ",", quote = TRUE, row.names = FALSE)
+
+screenTab
+
+
+
+# Visualizing the network of eigengenes
+# Recalculate module eigengenes
+MEs = moduleEigengenes(All_1, moduleColors)$eigengenes
+# Isolate Age_days from the clinical traits
+Disease = as.data.frame(datTraits$AD.PD);
+Age_group = as.data.frame(datTraits$Age_group);
+names(Disease) = "AD.PD"
+names(Age_group) = "Age_group"
+# Add the Age_days to existing module eigengenes
+MET = orderMEs(cbind(MEs, Age_group))
+write.table(MET,"module_eigengenes_0524.csv",sep=",",row.names=TRUE)
+```
